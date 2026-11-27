@@ -95,7 +95,7 @@ Nested `AGENTS.md` files (each with a `CLAUDE.md` symlink) hold the rules for on
 | [`src/tools/AGENTS.md`](./src/tools/AGENTS.md) | `CredentialStore`, credential refs, OAuth records, credential ownership; long-running (task-augmented) MCP tools |
 | [`src/conversation/AGENTS.md`](./src/conversation/AGENTS.md) | Conversation paths, workspace binding on resume, no conversation read or listing across workspaces |
 | [`src/files/AGENTS.md`](./src/files/AGENTS.md) | File store paths, bare `files://` URIs, the file locator |
-| [`src/api/AGENTS.md`](./src/api/AGENTS.md) | Three API audiences, tool actions over new routes, named response bodies, router middleware chained per route, `/mcp/<wsId>` wall and which credentials reach it, the browser origins `/mcp` and the `/v1` tool-call doors trust, the hosts answered without sign-in, the one protocol revision `/mcp` speaks and the connector prompts it serves, what blocks running more than one replica, `clientAddressFor` |
+| [`src/api/AGENTS.md`](./src/api/AGENTS.md) | Three API audiences, tool actions over new routes, named response bodies, router middleware chained per route, `/mcp/<wsId>` wall and which credentials reach it, redirect callbacks bound to the browser that started them, the browser origins `/mcp` and the `/v1` tool-call doors trust, the hosts answered without sign-in, the one protocol revision `/mcp` speaks and the connector prompts it serves, what blocks running more than one replica, `clientAddressFor` |
 | [`src/hooks/AGENTS.md`](./src/hooks/AGENTS.md) | The inbound webhook door: never parse a body, uniform 404, delivery ids, rotation, provisioning |
 | [`src/lifecycle/AGENTS.md`](./src/lifecycle/AGENTS.md) | Connector `on_ready` / `on_removing` notifications |
 | [`src/connectors/runtime/AGENTS.md`](./src/connectors/runtime/AGENTS.md) | Connector teardown and workspace delete; connection credential re-validation |
@@ -105,7 +105,7 @@ Nested `AGENTS.md` files (each with a `CLAUDE.md` symlink) hold the rules for on
 | [`test/conformance/AGENTS.md`](./test/conformance/AGENTS.md) | The MCP conformance suite against `/mcp/<wsId>`: what it measures, the per-version baselines, the pin, where it runs in CI |
 | [`web/src/bridge/AGENTS.md`](./web/src/bridge/AGENTS.md) | MCP App Bridge rules: iframe scoping, handshake gate, notification relay, host capabilities |
 | [`schemas/AGENTS.md`](./schemas/AGENTS.md) | The published schemas tree: path = URL, `/<thing>/v<major>/`, additive minors in place, breaking change = new major, legacy `/v1/<name>` aliases, each file's drift guard |
-| [`packages/cli/AGENTS.md`](./packages/cli/AGENTS.md) | The `nimblebrain` CLI (`npx nimblebrain`): setup and running, plus a thin client of the local instance's API (`mcp add`), Node 20 with no dependencies, the `{ok, error, fix}` JSON contract, the model key never in output, never touching an install it did not make |
+| [`packages/cli/AGENTS.md`](./packages/cli/AGENTS.md) | The `nimblebrain` CLI (`npx nimblebrain`): setup and running, plus a thin client of the local instance's API (`mcp add`) and the agent worker `use` starts, one self-contained file on Node 20, the `{ok, error, fix}` JSON contract, the model key never in output, never touching an install it did not make |
 
 ## Conventions
 

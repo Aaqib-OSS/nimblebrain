@@ -58,6 +58,13 @@ export function record(
   });
 }
 
+/** `claude auth status --json` for a person signed in to a Claude Max subscription. */
+export const CLAUDE_MAX = JSON.stringify({
+  loggedIn: true,
+  authMethod: "claude.ai",
+  subscriptionType: "max",
+});
+
 export const GB = 1024 ** 3;
 export const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "", missing: false });
 export const missing = (): ExecResult => ({ code: null, stdout: "", stderr: "", missing: true });
@@ -78,6 +85,8 @@ export interface Machine {
   launched: string[];
   /** The environment each `docker compose` call got. */
   composeEnvs: NodeJS.ProcessEnv[];
+  /** The environment each program run with one got, by its command line. */
+  execEnvs: Array<{ line: string; env: NodeJS.ProcessEnv }>;
   said: string[];
   /** Each question the CLI put to the person, in order. */
   asked: string[];
@@ -87,6 +96,18 @@ export interface Machine {
   posts: Array<{ url: string; body: unknown }>;
   /** The runtime's telemetry answer, read from `.env` when it starts, as the real one does. */
   runtimeConsent: "on" | "off" | "undecided";
+  /** Agent workers running, by pid: the port each listens on, its command line, and its login item's label. */
+  workers: Map<number, { port: number; command: string; label?: string }>;
+  /** Every worker launchd started from a login item, as its command line (`node script args…`) and log. */
+  spawned: Array<{ line: string; logPath: string }>;
+  /** Login items loaded into launchd, by label; a pid while its worker runs, else its last exit code. */
+  loaded: Map<string, { pid?: number; lastExit?: number }>;
+  /** The servers registered in Claude Code and Codex, by name: `mcp add` adds one, `mcp remove` removes it. */
+  servers: { claude: Set<string>; codex: Set<string> };
+  /** Milliseconds passed, as `sleep` counts them. */
+  now: number;
+  /** Ports a stopped worker still holds while it drains, until the time each is let go. */
+  draining: Map<number, number>;
   /** Ollama's models after the run, by name. */
   ollamaModels: Record<string, OllamaModel>;
   /** Whether Ollama answers. */
@@ -101,6 +122,12 @@ export interface MachineOptions {
   env?: NodeJS.ProcessEnv;
   files?: Record<string, string>;
   portFree?: boolean;
+  /** Ports something already holds; every other port is free (unless `portFree` is false). */
+  busyPorts?: number[];
+  /** Ports where a NimbleBrain web UI answers `/` (its page title names it). */
+  nimblebrainAt?: number[];
+  /** Servers already registered in Claude Code and Codex, by name. */
+  servers?: { claude?: string[]; codex?: string[] };
   /** Override for the instance's answers to `/v1/*`. */
   workspaces?: Array<{ id: string; name: string }>;
   tags?: string[];
@@ -122,6 +149,19 @@ export interface MachineOptions {
   platform?: NodeJS.Platform;
   /** Programs on `PATH` (`which`); default none. */
   programs?: string[];
+  /**
+   * What an agent worker does once started: `listens` (default) answers health
+   * on its port; `refuses` writes why to its log and exits, as one that is not
+   * signed in does.
+   */
+  worker?: "listens" | "refuses";
+  /** Agent workers already running when the run starts, by pid. */
+  workers?: Record<number, { port: number; command: string }>;
+  /**
+   * How long a worker that launchd stops (`bootout`) keeps holding its port
+   * while it drains, in the milliseconds `sleep` passes; default 0, released at once.
+   */
+  drainMs?: number;
   /** The CLI's npm `latest`; absent, the registry does not answer. */
   npmLatest?: string;
 }
@@ -138,13 +178,25 @@ export function machine(opts: MachineOptions = {}): Machine {
     calls: [] as string[],
     launched: [] as string[],
     composeEnvs: [] as NodeJS.ProcessEnv[],
+    execEnvs: [] as Array<{ line: string; env: NodeJS.ProcessEnv }>,
     said: [] as string[],
     asked: [] as string[],
     healthy: false,
     posts: [] as Array<{ url: string; body: unknown }>,
     runtimeConsent: "undecided" as "on" | "off" | "undecided",
     ollamaModels: { ...(opts.ollama?.models ?? {}) } as Record<string, OllamaModel>,
+    workers: new Map<number, { port: number; command: string; label?: string }>(
+      Object.entries(opts.workers ?? {}).map(([pid, w]) => [Number(pid), w] as const),
+    ),
+    spawned: [] as Array<{ line: string; logPath: string }>,
+    loaded: new Map<string, { pid?: number; lastExit?: number }>(),
+    now: 0,
+    draining: new Map<number, number>(),
     ollamaUp: Boolean(opts.ollama && !opts.ollama.down),
+    servers: {
+      claude: new Set(opts.servers?.claude ?? []),
+      codex: new Set(opts.servers?.codex ?? []),
+    },
   };
   const m = state;
   const exec: Record<string, ExecResult> = {
@@ -164,7 +216,8 @@ export function machine(opts: MachineOptions = {}): Machine {
       // The standalone `docker-compose` is the same program as the plugin; it drives the same instance.
       const composeLine = line.replace(/^docker-compose /, "docker compose ");
       if (composeLine.startsWith("docker compose ") && o.env) m.composeEnvs.push(o.env);
-      const res = exec[line] ?? ok();
+      if (o.env) m.execEnvs.push({ line, env: o.env });
+      const res = exec[line] ?? workerCommand(args, line) ?? ok();
       if (res.code === 0 && composeLine.startsWith("docker compose up")) {
         m.healthy = true;
         if (m.runtimeConsent === "undecided") {
@@ -195,13 +248,30 @@ export function machine(opts: MachineOptions = {}): Machine {
       }
       return res;
     },
+    self: { node: "/usr/local/bin/node", script: "/home/dana/.npm/_npx/1/nimblebrain.js" },
+    uid: 501,
     async launch(cmd, args) {
       m.launched.push([cmd, ...args].join(" "));
       return opts.launch ?? true;
     },
-    which: async (cmd) => (opts.programs ?? []).includes(cmd),
-    portFree: async () => opts.portFree ?? true,
+    which: async (cmd) =>
+      (opts.programs ?? []).includes(cmd) ? `/opt/homebrew/bin/${cmd}` : undefined,
+    portFree: async (port) =>
+      (opts.portFree ?? true) &&
+      !(opts.busyPorts ?? []).includes(port) &&
+      (m.draining.get(port) ?? 0) <= m.now,
     async getText(url) {
+      const page = url.match(/^http:\/\/127\.0\.0\.1:(\d+)\/$/);
+      if (page) {
+        return (opts.nimblebrainAt ?? []).includes(Number(page[1]))
+          ? { status: 200, body: "<!doctype html><title>NimbleBrain</title>" }
+          : undefined;
+      }
+      const health = url.match(/^http:\/\/127\.0\.0\.1:(\d+)\/healthz$/);
+      if (health) {
+        const listening = [...m.workers.values()].some((w) => w.port === Number(health[1]));
+        return listening ? { status: 200, body: "ok" } : undefined;
+      }
       if (url.endsWith("info/refs?service=git-upload-pack")) {
         // Git's ref advertisement: a peeled `^{}` line follows each annotated tag.
         const refs = (opts.tags ?? []).flatMap((t) => [
@@ -261,6 +331,8 @@ export function machine(opts: MachineOptions = {}): Machine {
       };
     },
     readText: async (path) => m.files.get(path)?.text,
+    // A folder exists when a file is in it.
+    exists: async (path) => [...m.files.keys()].some((f) => f === path || f.startsWith(`${path}/`)),
     async writeText(path, text, mode = 0o644) {
       m.files.set(path, { text, mode });
     },
@@ -272,7 +344,9 @@ export function machine(opts: MachineOptions = {}): Machine {
       return answers.shift() ?? "";
     },
     interactive: opts.interactive ?? false,
-    sleep: async () => {},
+    sleep: async (ms) => {
+      m.now += ms;
+    },
     say: (line) => {
       m.said.push(line);
     },
@@ -290,6 +364,102 @@ export function machine(opts: MachineOptions = {}): Machine {
     home: "/home/dana",
     cwd: "/home/dana/src",
   };
+  /**
+   * `launchctl bootstrap | bootout | print` for this user's login items, as
+   * launchd answers: a bootstrap reads the plist and starts its worker (or,
+   * with `worker: "refuses"`, the worker writes why to its log and exits 1).
+   */
+  function launchctl(args: string[]): ExecResult | undefined {
+    const [verb, target = "", plistPath] = args;
+    if (verb === "bootstrap" && plistPath) {
+      const text = m.files.get(plistPath)?.text ?? "";
+      const label = text.match(/<key>Label<\/key>\s*<string>([^<]+)<\/string>/)?.[1] ?? "";
+      if (m.loaded.has(label)) return fail("Bootstrap failed: 5: Input/output error", 5);
+      const program = [
+        ...(
+          text.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1] ?? ""
+        ).matchAll(/<string>([^<]*)<\/string>/g),
+      ].map((x) => x[1] ?? "");
+      const logPath =
+        text.match(/<key>StandardOutPath<\/key>\s*<string>([^<]+)<\/string>/)?.[1] ?? "";
+      const line = program.join(" ");
+      m.spawned.push({ line, logPath });
+      if (opts.worker === "refuses") {
+        m.files.set(logPath, {
+          text: "\n  Not started: Claude Code is not signed in.\n\n",
+          mode: 0o600,
+        });
+        m.loaded.set(label, { lastExit: 1 });
+        return ok();
+      }
+      const pid = 4242 + m.spawned.length - 1;
+      const port = Number(program[program.indexOf("--port") + 1]);
+      m.workers.set(pid, { port, command: line, label });
+      m.loaded.set(label, { pid });
+      return ok();
+    }
+    const label = target.split("/").slice(2).join("/");
+    if (verb === "bootout") {
+      if (!m.loaded.delete(label)) return fail("Boot-out failed: 3: No such process", 3);
+      for (const [pid, w] of m.workers) {
+        if (w.label !== label) continue;
+        m.workers.delete(pid);
+        if (opts.drainMs) m.draining.set(w.port, m.now + opts.drainMs);
+      }
+      return ok();
+    }
+    if (verb === "print") {
+      const l = m.loaded.get(label);
+      if (!l) return fail(`Could not find service "${label}"`, 113);
+      return ok(
+        l.pid
+          ? `${label} = {\n\tstate = running\n\tpid = ${l.pid}\n}\n`
+          : `${label} = {\n\tstate = not running\n\tlast exit code = ${l.lastExit ?? 0}\n}\n`,
+      );
+    }
+    return undefined;
+  }
+
+  /** `ps -p <pid> -o command=` and `kill`, as they answer for the agent workers running, and `launchctl`. */
+  function workerCommand(args: string[], line: string): ExecResult | undefined {
+    if (line.startsWith("launchctl ")) return launchctl(args);
+    const mcp = line.match(/^(claude|codex) mcp (add|remove|get) /);
+    if (mcp) return agentServers(mcp[1] as "claude" | "codex", mcp[2] ?? "", args);
+    const ps = line.match(/^ps -p (\d+) -o command=$/);
+    if (ps) {
+      const w = m.workers.get(Number(ps[1]));
+      return w ? ok(`${w.command}\n`) : fail("", 1);
+    }
+    const kill = line.match(/^kill -(TERM|KILL) (\d+)$/);
+    if (kill) {
+      const pid = Number(args[1]);
+      return m.workers.delete(pid) ? ok() : fail("no such process");
+    }
+    return undefined;
+  }
+
+  /**
+   * `claude mcp` and `codex mcp`, as each agent's CLI keeps its servers: `get`
+   * fails for a name it does not have, `add` and `remove` change the set.
+   */
+  function agentServers(agent: "claude" | "codex", verb: string, args: string[]): ExecResult {
+    const set = m.servers[agent];
+    const name =
+      verb === "add"
+        ? agent === "claude"
+          ? (args.at(-2) ?? "")
+          : (args[2] ?? "")
+        : (args.at(-1) ?? "");
+    if (verb === "get")
+      return set.has(name) ? ok(name) : fail(`No MCP server found with name: ${name}`);
+    if (verb === "add") {
+      if (set.has(name)) return fail(`MCP server ${name} already exists`);
+      set.add(name);
+      return ok();
+    }
+    return set.delete(name) ? ok() : fail(`No MCP server found with name: ${name}`);
+  }
+
   /** Ollama's API, as the real one answers the calls the CLI makes. */
   function ollama(url: string, body: unknown): { status: number; body: unknown } | undefined {
     if (!opts.ollama || !m.ollamaUp) return undefined;

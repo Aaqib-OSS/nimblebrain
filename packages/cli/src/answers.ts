@@ -15,6 +15,7 @@ import type { DoctorAnswer } from "./main.ts";
 import type { McpAnswers } from "./mcp.ts";
 import type { open } from "./open.ts";
 import type { status } from "./status.ts";
+import type { use } from "./use.ts";
 
 /**
  * What each command's `{ok: true}` answer carries, field by field, as
@@ -23,6 +24,12 @@ import type { status } from "./status.ts";
  * that is not described here, or one described here that no command answers,
  * fails the type-check. A field present only sometimes says when.
  */
+
+const MODEL_SOURCE =
+  "{source, label, model}: what runs NimbleBrain's agents, as use names it (claude, codex, api or local; null when nothing does yet); that as a person reads it, such as your Claude Max subscription through Claude Code (Sonnet); and the model a subscription's turns run on as --model named it (sonnet by default for claude; null for Codex's own default, and for api and local). A subscription is in use whenever .env names its worker; a saved key or local model then serves only runs with a spend budget";
+
+const AGENT_RUNTIME =
+  "{name, worker}: the runtime NimbleBrain's agents run on (native, claude-code or codex), and the agent worker that serves it as {running, pid, url, log, login_item} (null for native): whether it answers /healthz, its process id while it runs, its ACP URL on 127.0.0.1, its log file, and the macOS LaunchAgent that starts it at login and again after a crash (null when none is installed, as after down)";
 
 /** The fields of every answer that carries an install's state (`status`, `init`, `up`, `update`). */
 const STATE = {
@@ -34,11 +41,13 @@ const STATE = {
   url: "Where the web UI and API answer, on 127.0.0.1",
   workspaces: "Each workspace as {id, name, mcp}, mcp being its MCP URL; empty while down",
   agent:
-    "{connected, skill}: the coding agent init connected (or null), and the nimblebrain skill's name when that agent has it (else null)",
+    "{connected, server, skill}: the coding agent init connected (or null), the name this install's server is registered under in it (nimblebrain for the default home, nimblebrain-<folder> for another; null with no agent), and the nimblebrain skill's name when that agent has it (else null)",
   model_key: "set or missing: whether the install's .env holds a model key (never the key)",
   host_loopback:
     "Whether this release can reach a server on this machine; mcp add needs it, update brings it",
-  local_model: "The Ollama model NimbleBrain's agents run on, or null for a hosted model key",
+  local_model: "The Ollama model saved for NimbleBrain's agents (nimblebrain-<model>), or null",
+  model_source: MODEL_SOURCE,
+  agent_runtime: AGENT_RUNTIME,
   telemetry:
     "{state, locked?, ask?, set?}: on, off or undecided; locked says why no one can change it here; ask and set, only while undecided, are the question to pass to the person and the command that answers it",
   updates:
@@ -47,18 +56,24 @@ const STATE = {
 
 const OLLAMA_STARTED = "The command that started Ollama, when this run started it";
 
+const PORT_MOVED =
+  "{from, to, held_by, home}: present when the default port was in use and no --port was given, so the next free port 100 on was taken instead: the default, the port used, what holds the default (nimblebrain: another install's web UI; agent_worker: another install's agent worker; other: anything else), and that install's home when the CLI can see it (else null)";
+
 export const ANSWER_FIELDS = {
   init: {
     ...STATE,
+    model_source: `${MODEL_SOURCE}. When nothing runs them and no person was asked (--yes, --json or no terminal, without --use), it also carries {ask, options, default, set}: the question to pass to the person, each source as {source, label, available, detected, note} (available: it can be chosen here; detected: signed in, a key saved, or Ollama answering), the one to suggest, and the command that answers it`,
     already: "true when an install was already here; it was reported, not changed",
     manual: "The settings to add to the coding agent by hand, when connecting it failed",
     opened: "Whether the browser opened, when init tried (a new install, a person at a terminal)",
     ollama_started: OLLAMA_STARTED,
+    port_moved: `${PORT_MOVED}; on a new install only, and recorded, so every later command uses it`,
   },
   doctor: {
     checks: "Each check run, in order, as {check, ok, detail}",
     arch: "The CPU architecture Docker reports",
     ollama_started: `${OLLAMA_STARTED}; on a local model only`,
+    port_moved: `${PORT_MOVED}; with no install in the home, as init would take it`,
   },
   status: STATE,
   open: {
@@ -74,6 +89,18 @@ export const ANSWER_FIELDS = {
     ollama_started: OLLAMA_STARTED,
   },
   telemetry: { telemetry: STATE.telemetry },
+  use: {
+    model_source: MODEL_SOURCE,
+    agent_runtime: AGENT_RUNTIME,
+    billed_to:
+      "Who pays for each turn, from the agent CLI's own sign-in, such as your Claude Max subscription; for claude and codex only",
+    tools:
+      "What the agent CLI may call during a turn: your workspace's tools, and for Codex its read-only shell; for claude and codex only",
+    provider: "The provider whose key is saved; for api only",
+    local_model: "The model NimbleBrain's agents now run on (nimblebrain-<model>); for local only",
+    ollama_started: `${OLLAMA_STARTED}; for local only`,
+    port_moved: `${PORT_MOVED}; the agent worker's port, for claude and codex only (27290 and 27291 by default), recorded in .env and the login item`,
+  },
   up: { ...STATE, ollama_started: OLLAMA_STARTED },
   down: { health: "down" },
   logs: { lines: "The runtime's last log lines, up to 100" },
@@ -123,6 +150,7 @@ interface Builders {
   key: typeof key;
   "local-model": typeof localModel;
   telemetry: typeof telemetry;
+  use: typeof use;
   up: typeof up;
   down: typeof down;
   logs: typeof logs;
